@@ -8,8 +8,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from mcp_agent.config import Settings
 
@@ -137,6 +138,8 @@ class AlphaXivClient:
         self._use_legacy_bearer_token = use_legacy_bearer_token
         self._token_storage = FileTokenStorage(settings.mcp_token_storage_path)
         self._oauth_bootstrap_performed = False
+        self._oauth_callback_completed = False
+        self._token_cache_used = False
         self._last_metadata = self._base_metadata()
 
     @property
@@ -175,63 +178,80 @@ class AlphaXivClient:
         result: Any = None
         stage = "auth_setup"
         metadata = self._base_metadata()
+        transport_context: Any | None = None
+        transport_opened = False
 
         try:
-            client_session_cls, sse_client = self._load_mcp_client_deps()
+            client_session_cls = self._load_mcp_client_deps()
             auth_context = await self._build_live_auth_context()
             metadata.update(
                 {
                     "auth_mode": auth_context.auth_mode,
                     "auth_status": auth_context.auth_status,
-                    "token_cache_used": auth_context.token_cache_used,
+                    "token_cache_used": self._token_cache_used,
                     "oauth_bootstrap_performed": auth_context.oauth_bootstrap_performed,
                 }
             )
+            metadata["oauth_bootstrap_performed"] = self._oauth_bootstrap_performed
 
-            async with asyncio.timeout(self._settings.mcp_request_timeout_seconds):
-                stage = "sse_connect"
-                async with self._open_sse_transport(
-                    sse_client=sse_client,
-                    auth_context=auth_context,
-                ) as (read_stream, write_stream):
-                    stage = "session_initialize"
-                    async with client_session_cls(read_stream, write_stream) as session:
-                        await session.initialize()
+            stage = "sse_connect"
+            transport_context = self._open_sse_transport(auth_context=auth_context)
+            read_stream, write_stream = await self._await_stage(
+                transport_context.__aenter__(),
+                stage=stage,
+                timeout_seconds=self._settings.mcp_auth_timeout_seconds,
+                metadata=metadata,
+            )
+            transport_opened = True
+            metadata["token_cache_used"] = self._token_cache_used
+            metadata["auth_status"] = "sse_connected"
 
-                        stage = "tool_list"
-                        metadata["tool_list"] = await self._list_tool_names(session)
+            stage = "initialize"
+            async with client_session_cls(read_stream, write_stream) as session:
+                await self._await_stage(
+                    session.initialize(),
+                    stage=stage,
+                    timeout_seconds=self._settings.mcp_request_timeout_seconds,
+                    metadata=metadata,
+                )
 
-                        if auth_only:
-                            metadata["oauth_bootstrap_performed"] = self._oauth_bootstrap_performed
-                            metadata["auth_status"] = (
-                                "interactive_bootstrap_completed"
-                                if self._oauth_bootstrap_performed
-                                else metadata["auth_status"]
-                            )
-                            self._last_metadata = metadata
-                            return _LiveCallArtifacts(payload={"papers": []}, metadata=metadata)
+                stage = "tool_list"
+                metadata["tool_list"] = await self._await_stage(
+                    self._list_tool_names(session),
+                    stage=stage,
+                    timeout_seconds=self._settings.mcp_request_timeout_seconds,
+                    metadata=metadata,
+                )
 
-                        stage = "tool_call"
-                        result = await session.call_tool(
-                            "embedding_similarity_search",
-                            arguments={"query": query},
-                        )
+                if auth_only:
+                    metadata["oauth_bootstrap_performed"] = self._oauth_bootstrap_performed
+                    metadata["token_cache_used"] = self._token_cache_used
+                    metadata["auth_status"] = (
+                        "oauth_callback_completed"
+                        if self._oauth_callback_completed
+                        else metadata["auth_status"]
+                    )
+                    self._last_metadata = metadata
+                    return _LiveCallArtifacts(payload={"papers": []}, metadata=metadata)
+
+                stage = "tool_call"
+                result = await self._await_stage(
+                    session.call_tool(
+                        "embedding_similarity_search",
+                        arguments={"query": query},
+                    ),
+                    stage=stage,
+                    timeout_seconds=self._settings.mcp_request_timeout_seconds,
+                    metadata=metadata,
+                )
 
             stage = "response_parse"
             payload = self._coerce_tool_result(result)
             metadata["oauth_bootstrap_performed"] = self._oauth_bootstrap_performed
+            metadata["token_cache_used"] = self._token_cache_used
             metadata["auth_status"] = self._resolve_auth_status(metadata["token_cache_used"])
             self._last_metadata = metadata
             return _LiveCallArtifacts(payload=payload, metadata=metadata)
-        except TimeoutError as exc:
-            error = self._build_error(
-                "Timed out while communicating with alphaXiv MCP.",
-                stage=stage,
-                exc=exc,
-                metadata=metadata,
-            )
-            self._last_metadata = error.metadata
-            raise error from exc
         except AlphaXivClientError as exc:
             self._last_metadata = {**metadata, **exc.metadata}
             raise
@@ -244,6 +264,9 @@ class AlphaXivClient:
             )
             self._last_metadata = error.metadata
             raise error from exc
+        finally:
+            if transport_context is not None and transport_opened:
+                await transport_context.__aexit__(None, None, None)
 
     async def _build_live_auth_context(self) -> _LiveAuthContext:
         legacy_token = self._settings.get_legacy_bearer_token()
@@ -272,11 +295,13 @@ class AlphaXivClient:
             )
 
         self._oauth_bootstrap_performed = False
+        self._oauth_callback_completed = False
         OAuthClientProvider, OAuthClientMetadata, AnyUrl = self._load_oauth_deps()
         try:
             cached_token = await self._token_storage.get_tokens()
         except ImportError:
             cached_token = None
+        self._token_cache_used = bool(cached_token)
 
         oauth_auth = OAuthClientProvider(
             server_url=self._settings.alphaxiv_mcp_url,
@@ -303,7 +328,10 @@ class AlphaXivClient:
 
     def _handle_oauth_redirect(self, auth_url: str) -> Awaitable[None]:
         async def _runner() -> None:
+            started_at = perf_counter()
             self._oauth_bootstrap_performed = True
+            self._token_cache_used = False
+            self._debug_log("oauth_redirect_start", started_at, extra={"token_cache_used": self._token_storage.has_cache()})
             print("alphaXiv OAuth authorization required.")
             print(f"Open this URL in your browser and complete login:\n{auth_url}")
             print("After the browser redirects, paste the full callback URL here.")
@@ -312,6 +340,7 @@ class AlphaXivClient:
 
     def _handle_oauth_callback(self) -> Awaitable[tuple[str, str | None]]:
         async def _runner() -> tuple[str, str | None]:
+            started_at = perf_counter()
             if not sys.stdin.isatty():
                 raise AlphaXivClientError(
                     "Interactive OAuth bootstrap is required before live alphaXiv retrieval can continue.",
@@ -339,26 +368,31 @@ class AlphaXivClient:
                     },
                 )
 
-            from urllib.parse import parse_qs, urlparse
-
             query = parse_qs(urlparse(callback_url).query)
+            self._oauth_callback_completed = True
+            self._debug_log("oauth_callback_completed", started_at)
             return query["code"][0], query.get("state", [None])[0]
 
         return _runner()
 
     @asynccontextmanager
-    async def _open_sse_transport(self, *, sse_client: Callable[..., Any], auth_context: _LiveAuthContext) -> Any:
-        kwargs: dict[str, Any] = {
-            "url": self._settings.alphaxiv_mcp_url,
-            "headers": auth_context.headers,
-            "timeout": self._settings.mcp_auth_timeout_seconds,
-            "sse_read_timeout": self._settings.mcp_request_timeout_seconds,
-            "auth": auth_context.auth,
-        }
+    async def _open_sse_transport(self, *, auth_context: _LiveAuthContext) -> Any:
+        started_at = perf_counter()
         if self._debug_mcp:
-            logger.debug("Connecting to alphaXiv MCP endpoint %s", self._settings.alphaxiv_mcp_url)
+            logger.debug(
+                "Connecting to alphaXiv MCP endpoint %s (token_cache_used=%s)",
+                self._settings.alphaxiv_mcp_url,
+                auth_context.token_cache_used,
+            )
 
-        async with sse_client(**kwargs) as streams:
+        async with self._alphaxiv_sse_client(
+            url=self._settings.alphaxiv_mcp_url,
+            headers=auth_context.headers,
+            timeout=self._settings.mcp_auth_timeout_seconds,
+            sse_read_timeout=self._settings.mcp_request_timeout_seconds,
+            auth=auth_context.auth,
+        ) as streams:
+            self._debug_log("sse_connect", started_at)
             yield streams
 
     async def _list_tool_names(self, session: Any) -> list[str]:
@@ -441,8 +475,10 @@ class AlphaXivClient:
             return "The OAuth browser callback could not be processed."
         if auth_status == "sse_connect_failed":
             return "The alphaXiv SSE MCP transport could not be established."
-        if auth_status == "mcp_session_initialize_failed":
+        if auth_status == "initialize_failed":
             return "The MCP session connected but failed during initialization."
+        if auth_status == "tool_call_timed_out":
+            return "The embedding_similarity_search MCP tool call timed out after the session connected."
         if auth_status == "tool_call_failed":
             return "The embedding_similarity_search MCP tool call failed after session initialization."
         return "alphaXiv MCP retrieval failed."
@@ -472,8 +508,8 @@ class AlphaXivClient:
             return {**metadata, "auth_status": "auth_discovery_failed"}
         if stage == "sse_connect":
             return {**metadata, "auth_status": "sse_connect_failed"}
-        if stage == "session_initialize":
-            return {**metadata, "auth_status": "mcp_session_initialize_failed"}
+        if stage == "initialize":
+            return {**metadata, "auth_status": "initialize_failed"}
         if stage == "tool_call":
             return {**metadata, "auth_status": "tool_call_failed"}
         if stage == "response_parse":
@@ -506,10 +542,10 @@ class AlphaXivClient:
         return details
 
     def _resolve_auth_status(self, token_cache_used: bool) -> str:
-        if self._oauth_bootstrap_performed:
-            return "interactive_bootstrap_completed"
+        if self._oauth_callback_completed:
+            return "oauth_callback_completed"
         if token_cache_used:
-            return "cached_token"
+            return "sse_connected"
         return "authorized"
 
     def _base_metadata(self) -> dict[str, Any]:
@@ -538,10 +574,9 @@ class AlphaXivClient:
                 },
             )
 
-    def _load_mcp_client_deps(self) -> tuple[type[Any], Callable[..., Any]]:
+    def _load_mcp_client_deps(self) -> type[Any]:
         try:
             from mcp import ClientSession
-            from mcp.client.sse import sse_client
         except ImportError as exc:  # pragma: no cover - dependency boundary
             raise AlphaXivClientError(
                 "The mcp package is required for live alphaXiv calls.",
@@ -553,7 +588,7 @@ class AlphaXivClient:
                 },
             ) from exc
 
-        return ClientSession, sse_client
+        return ClientSession
 
     def _load_oauth_deps(self) -> tuple[type[Any], type[Any], type[Any]]:
         try:
@@ -574,6 +609,161 @@ class AlphaXivClient:
         _ = TokenStorage
 
         return OAuthClientProvider, OAuthClientMetadata, AnyUrl
+
+    async def _await_stage(
+        self,
+        awaitable: Awaitable[Any],
+        *,
+        stage: str,
+        timeout_seconds: float,
+        metadata: dict[str, Any],
+    ) -> Any:
+        started_at = perf_counter()
+        try:
+            result = await asyncio.wait_for(awaitable, timeout=timeout_seconds)
+        except TimeoutError as exc:
+            status = "tool_call_timed_out" if stage == "tool_call" else self._classify_exception(
+                stage=stage,
+                exc=exc,
+                details=self._exception_details(exc),
+            ).get("auth_status", "retrieval_failed")
+            error = self._build_error(
+                self._timeout_message_for_stage(stage),
+                stage=stage,
+                exc=exc,
+                metadata={
+                    **metadata,
+                    "auth_status": status,
+                    "oauth_bootstrap_performed": self._oauth_bootstrap_performed,
+                    "token_cache_used": self._token_cache_used,
+                },
+            )
+            self._last_metadata = error.metadata
+            raise error from exc
+
+        self._debug_log(stage, started_at)
+        return result
+
+    def _timeout_message_for_stage(self, stage: str) -> str:
+        if stage == "sse_connect":
+            return "Timed out while establishing the alphaXiv SSE transport."
+        if stage == "initialize":
+            return "Timed out while initializing the alphaXiv MCP session."
+        if stage == "tool_list":
+            return "Timed out while listing alphaXiv MCP tools after initialization."
+        if stage == "tool_call":
+            return "Timed out while waiting for embedding_similarity_search to return."
+        return "Timed out while communicating with alphaXiv MCP."
+
+    def _debug_log(self, stage: str, started_at: float, *, extra: dict[str, Any] | None = None) -> None:
+        if not self._debug_mcp:
+            return
+
+        elapsed = perf_counter() - started_at
+        if extra:
+            logger.debug("alphaXiv %s completed in %.3fs (%s)", stage, elapsed, extra)
+            return
+        logger.debug("alphaXiv %s completed in %.3fs", stage, elapsed)
+
+    @asynccontextmanager
+    async def _alphaxiv_sse_client(
+        self,
+        *,
+        url: str,
+        headers: dict[str, Any] | None,
+        timeout: float,
+        sse_read_timeout: float,
+        auth: Any,
+    ) -> Any:
+        try:
+            import anyio
+            import httpx
+            from anyio.abc import TaskStatus
+            from httpx_sse import SSEError, aconnect_sse
+            from mcp import types
+            from mcp.shared._httpx_utils import create_mcp_http_client
+            from mcp.shared.message import SessionMessage
+        except ImportError as exc:  # pragma: no cover - dependency boundary
+            raise AlphaXivClientError(
+                "The installed MCP stack is missing SSE transport dependencies.",
+                metadata={
+                    **self._base_metadata(),
+                    "auth_mode": "oauth_discovery",
+                    "auth_status": "missing_mcp_sdk",
+                    "debug_hint": "Ensure the mcp SDK and httpx-sse dependencies are installed in the active Poetry environment.",
+                },
+            ) from exc
+
+        read_stream_writer, read_stream = anyio.create_memory_object_stream(0)
+        write_stream, write_stream_reader = anyio.create_memory_object_stream(0)
+
+        async with create_mcp_http_client(
+            headers=headers,
+            auth=auth,
+            timeout=httpx.Timeout(timeout, read=sse_read_timeout),
+        ) as client:
+            async with aconnect_sse(client, "GET", url) as event_source:
+                event_source.response.raise_for_status()
+
+                async def sse_reader(task_status: TaskStatus[str] = anyio.TASK_STATUS_IGNORED) -> None:
+                    try:
+                        async for sse in event_source.aiter_sse():
+                            event_name = sse.event or "message"
+                            if self._is_heartbeat_event(event_name=event_name, data=sse.data):
+                                if self._debug_mcp:
+                                    logger.debug("Ignoring alphaXiv SSE heartbeat event: %s", event_name)
+                                continue
+
+                            match event_name:
+                                case "endpoint":
+                                    endpoint_url = urljoin(url, sse.data)
+                                    task_status.started(endpoint_url)
+                                case "message":
+                                    if not sse.data:
+                                        continue
+                                    try:
+                                        message = types.jsonrpc_message_adapter.validate_json(sse.data, by_name=False)
+                                    except Exception as exc:
+                                        logger.exception("Error parsing alphaXiv SSE message")
+                                        await read_stream_writer.send(exc)
+                                        continue
+                                    await read_stream_writer.send(SessionMessage(message))
+                                case _:
+                                    logger.warning("Ignoring unsupported alphaXiv SSE event: %s", event_name)
+                    except SSEError as sse_exc:
+                        raise sse_exc
+                    except Exception as exc:
+                        await read_stream_writer.send(exc)
+                    finally:
+                        await read_stream_writer.aclose()
+
+                async def post_writer(endpoint_url: str) -> None:
+                    try:
+                        async with write_stream_reader, write_stream:
+                            async for session_message in write_stream_reader:
+                                response = await client.post(
+                                    endpoint_url,
+                                    json=session_message.message.model_dump(
+                                        by_alias=True,
+                                        mode="json",
+                                        exclude_unset=True,
+                                    ),
+                                )
+                                response.raise_for_status()
+                    except Exception as exc:
+                        await read_stream_writer.send(exc)
+
+                async with read_stream_writer, read_stream, write_stream, write_stream_reader, anyio.create_task_group() as tg:
+                    endpoint_url = await tg.start(sse_reader)
+                    tg.start_soon(post_writer, endpoint_url)
+                    yield read_stream, write_stream
+                    tg.cancel_scope.cancel()
+
+    def _is_heartbeat_event(self, *, event_name: str, data: str | None) -> bool:
+        normalized = event_name.strip().lower()
+        if normalized in {"ping", "keepalive", "heartbeat"}:
+            return True
+        return normalized == "message" and not (data or "").strip()
 
     def _build_mock_response(self, expanded_query: str) -> dict[str, Any]:
         return {

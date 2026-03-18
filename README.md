@@ -43,7 +43,7 @@ Important settings:
 - `ALPHAXIV_MCP_URL` defaults to `https://api.alphaxiv.org/mcp/v1`
 - `MCP_TOKEN_STORAGE_PATH` controls where OAuth tokens/client registration are cached
 - `MCP_AUTH_TIMEOUT_SECONDS` controls OAuth discovery / auth handshake timeout
-- `MCP_REQUEST_TIMEOUT_SECONDS` controls the SSE session / tool-call timeout
+- `MCP_REQUEST_TIMEOUT_SECONDS` controls the SSE session / tool-call timeout (default `120`)
 - `MCP_MODE=mock` for local testing or `MCP_MODE=live` for alphaXiv MCP
 - `REQUEST_TIMEOUT_SECONDS` to control LLM timeout
 
@@ -89,6 +89,8 @@ Bootstrap with verbose MCP/OAuth diagnostics:
 ```bash
 poetry run python -m mcp_agent.cli --auth-only --debug-mcp
 ```
+
+With `--debug-mcp`, the client logs timing for OAuth callback completion, SSE connect, MCP initialize, `list_tools`, and `embedding_similarity_search`, and it unwraps nested transport exceptions so you can see whether a timeout happened during connect, initialize, or tool call.
 
 Clear the cached token/client registration:
 

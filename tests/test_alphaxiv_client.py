@@ -89,6 +89,15 @@ def test_nested_exception_group_unwraps_leaf_errors() -> None:
     assert any("ValueError: bad redirect" in detail for detail in details)
 
 
+def test_ping_events_are_treated_as_heartbeat() -> None:
+    client = AlphaXivClient(Settings(MCP_MODE="mock"))
+
+    assert client._is_heartbeat_event(event_name="ping", data="{}") is True
+    assert client._is_heartbeat_event(event_name="heartbeat", data="") is True
+    assert client._is_heartbeat_event(event_name="message", data="") is True
+    assert client._is_heartbeat_event(event_name="message", data='{"jsonrpc":"2.0"}') is False
+
+
 @dataclass
 class _FakeTool:
     name: str
@@ -168,8 +177,28 @@ def test_initialize_and_tool_listing_with_mocked_mcp_session(monkeypatch: pytest
 
     metadata = asyncio.run(client.ensure_authenticated())
 
-    assert metadata["auth_status"] == "cached_token"
+    assert metadata["auth_status"] == "sse_connected"
     assert metadata["tool_list"] == ["embedding_similarity_search"]
+
+
+def test_auth_only_marks_oauth_callback_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AlphaXivClient(
+        Settings(
+            MCP_MODE="live",
+            ALPHAXIV_MCP_URL="https://api.alphaxiv.org/mcp/v1",
+            MCP_TOKEN_STORAGE_PATH="/tmp/alphaxiv-callback-complete.json",
+        )
+    )
+    _patch_live_oauth(monkeypatch, client)
+    client._oauth_bootstrap_performed = True
+    client._oauth_callback_completed = True
+    client._token_cache_used = False
+
+    metadata = asyncio.run(client.ensure_authenticated())
+
+    assert metadata["oauth_bootstrap_performed"] is True
+    assert metadata["token_cache_used"] is False
+    assert metadata["auth_status"] == "oauth_callback_completed"
 
 
 def test_embedding_similarity_search_parses_structured_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,3 +236,28 @@ def test_auth_failure_path_classifies_unauthorized(monkeypatch: pytest.MonkeyPat
         asyncio.run(client.ensure_authenticated())
 
     assert exc_info.value.metadata["auth_status"] == "unauthorized"
+
+
+def test_tool_call_timeout_reports_specific_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AlphaXivClient(
+        Settings(
+            MCP_MODE="live",
+            ALPHAXIV_MCP_URL="https://api.alphaxiv.org/mcp/v1",
+            MCP_TOKEN_STORAGE_PATH="/tmp/alphaxiv-timeout.json",
+            MCP_REQUEST_TIMEOUT_SECONDS=0.01,
+        )
+    )
+    _patch_live_oauth(monkeypatch, client)
+
+    class SlowSession(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, str]) -> _FakeCallToolResult:
+            await asyncio.sleep(0.1)
+            return await super().call_tool(name, arguments)
+
+    monkeypatch.setattr(client, "_load_mcp_client_deps", lambda: (SlowSession, _fake_sse_client))
+
+    with pytest.raises(AlphaXivClientError) as exc_info:
+        asyncio.run(client.embedding_similarity_search("expanded query"))
+
+    assert exc_info.value.metadata["auth_status"] == "tool_call_timed_out"
+    assert "embedding_similarity_search" in str(exc_info.value)

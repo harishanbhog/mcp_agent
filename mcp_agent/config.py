@@ -19,7 +19,7 @@ class Settings(BaseSettings):
         alias="MCP_TOKEN_STORAGE_PATH",
     )
     mcp_auth_timeout_seconds: float = Field(default=30.0, alias="MCP_AUTH_TIMEOUT_SECONDS")
-    mcp_request_timeout_seconds: float = Field(default=60.0, alias="MCP_REQUEST_TIMEOUT_SECONDS")
+    mcp_request_timeout_seconds: float = Field(default=120.0, alias="MCP_REQUEST_TIMEOUT_SECONDS")
     mcp_mode: str = Field(default="mock", alias="MCP_MODE")
     request_timeout_seconds: float = Field(default=30.0, alias="REQUEST_TIMEOUT_SECONDS")
 
