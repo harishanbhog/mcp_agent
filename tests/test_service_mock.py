@@ -26,4 +26,6 @@ def test_run_mcp_agent_in_mock_mode_returns_contract() -> None:
     assert response.metadata["source"] == "alphaxiv_mcp"
     assert response.metadata["tool"] == "embedding_similarity_search"
     assert response.metadata["retrieval_count"] == len(response.papers)
+    assert response.metadata["auth_mode"] == "mock"
+    assert response.metadata["auth_status"] == "not_applicable"
     assert len(response.papers) >= 1

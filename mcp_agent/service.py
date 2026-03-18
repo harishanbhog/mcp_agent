@@ -32,9 +32,11 @@ async def run_mcp_agent(
 
     try:
         raw_results = await alphaxiv_client.embedding_similarity_search(expanded_query)
+        client_metadata = alphaxiv_client.last_metadata
     except AlphaXivClientError as exc:
         retrieval_error = str(exc)
         raw_results = {"papers": []}
+        client_metadata = {**alphaxiv_client.last_metadata, **exc.metadata}
 
     papers = normalize_papers(raw_results)
     summary = synthesize_summary(papers)
@@ -48,6 +50,7 @@ async def run_mcp_agent(
         "mcp_mode": runtime_settings.mcp_mode,
         "query_expansion_mode": expansion_mode,
     }
+    metadata.update(client_metadata)
     if expansion_error:
         metadata["query_expansion_error"] = expansion_error
     if retrieval_error:

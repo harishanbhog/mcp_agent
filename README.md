@@ -41,13 +41,23 @@ Important settings:
 - `OPENAI_API_KEY` for query expansion in live mode
 - `OPENAI_BASE_URL` optional for OpenAI-compatible providers
 - `ALPHAXIV_MCP_URL` defaults to `https://api.alphaxiv.org/mcp/v1`
-- `ALPHAXIV_OAUTH_ACCESS_TOKEN` optional convenience setting for a bearer token obtained from your alphaXiv OAuth 2.0 flow
+- `MCP_TOKEN_STORAGE_PATH` controls where OAuth tokens/client registration are cached
+- `MCP_AUTH_TIMEOUT_SECONDS` controls OAuth discovery / auth handshake timeout
+- `MCP_REQUEST_TIMEOUT_SECONDS` controls the SSE session / tool-call timeout
 - `MCP_MODE=mock` for local testing or `MCP_MODE=live` for alphaXiv MCP
-- `REQUEST_TIMEOUT_SECONDS` to control LLM and MCP timeouts
+- `REQUEST_TIMEOUT_SECONDS` to control LLM timeout
 
 ## alphaXiv authentication note
 
-As of March 18, 2026, the alphaXiv MCP docs describe the MCP endpoint as SSE transport with OAuth 2.0 authentication, but they do not document a project-specific environment variable for passing an OAuth access token. This project therefore supports `ALPHAXIV_OAUTH_ACCESS_TOKEN` as a convenience for environments that already have a valid bearer token, while still keeping the live adapter isolated so a fuller MCP OAuth integration can be added later.
+alphaXiv documents:
+
+- MCP endpoint: `https://api.alphaxiv.org/mcp/v1`
+- transport: SSE
+- auth: OAuth 2.0
+
+The live client now uses the Python MCP SDK's OAuth discovery flow instead of assuming a manually pasted bearer token. On the first live run, the CLI can perform an interactive OAuth bootstrap and cache the resulting token/client registration locally. Subsequent runs reuse the cached token automatically.
+
+`ALPHAXIV_LEGACY_BEARER_TOKEN` is retained only as an explicit fallback for temporary debugging when combined with `--use-legacy-bearer-token`.
 
 ## Run the CLI
 
@@ -66,6 +76,26 @@ For JSON output:
 poetry run python -m mcp_agent.cli --json ...
 ```
 
+## OAuth bootstrap and token cache
+
+Bootstrap OAuth without running retrieval:
+
+```bash
+poetry run python -m mcp_agent.cli --auth-only
+```
+
+Bootstrap with verbose MCP/OAuth diagnostics:
+
+```bash
+poetry run python -m mcp_agent.cli --auth-only --debug-mcp
+```
+
+Clear the cached token/client registration:
+
+```bash
+poetry run python -m mcp_agent.cli --clear-token-cache --auth-only
+```
+
 ## Run tests
 
 ```bash
@@ -76,7 +106,34 @@ poetry run pytest
 
 - Use `MCP_MODE=mock` for local development and automated tests.
 - Use `MCP_MODE=live` to connect to alphaXiv MCP over SSE.
-- In live mode, provide `OPENAI_API_KEY` for query expansion and either `ALPHAXIV_OAUTH_ACCESS_TOKEN` or a calling runtime that handles the MCP OAuth flow.
+- In live mode, provide `OPENAI_API_KEY` for query expansion.
+- For alphaXiv auth, run `--auth-only` once to complete OAuth bootstrap and cache the token, then run the normal CLI command.
+- If debugging a pre-issued raw bearer token, pass `--use-legacy-bearer-token` and set `ALPHAXIV_LEGACY_BEARER_TOKEN`, but this is not the default path.
+
+## Live debugging examples
+
+Run a live query after OAuth bootstrap:
+
+```bash
+poetry run python -m mcp_agent.cli \
+  --floor-id bio_floor \
+  --floor-title "BioInformatics Floor" \
+  --floor-description "A research floor for bioinformatics, computational biology, genomics, protein modeling, drug discovery, and related AI/ML research." \
+  --query "protein language models for variant effect prediction" \
+  --llm-model "gpt-4.1-mini"
+```
+
+Run the same query with verbose MCP diagnostics:
+
+```bash
+poetry run python -m mcp_agent.cli \
+  --floor-id bio_floor \
+  --floor-title "BioInformatics Floor" \
+  --floor-description "A research floor for bioinformatics, computational biology, genomics, protein modeling, drug discovery, and related AI/ML research." \
+  --query "protein language models for variant effect prediction" \
+  --llm-model "gpt-4.1-mini" \
+  --debug-mcp
+```
 
 The alphaXiv adapter is isolated in `mcp_agent/alphaxiv_client.py`, so later router integration only needs to call `run_mcp_agent`.
 
