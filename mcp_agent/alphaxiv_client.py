@@ -27,9 +27,20 @@ class AlphaXivClient:
         except ImportError as exc:  # pragma: no cover - dependency boundary
             raise AlphaXivClientError("The mcp package is required for live alphaXiv calls.") from exc
 
+        if not self._settings.alphaxiv_oauth_access_token:
+            raise AlphaXivClientError(
+                "alphaXiv live mode requires OAuth 2.0 authentication. "
+                "Set ALPHAXIV_OAUTH_ACCESS_TOKEN to a valid bearer token from your OAuth flow, "
+                "or integrate the MCP OAuth flow in the calling runtime."
+            )
+
+        headers = {
+            "Authorization": f"Bearer {self._settings.alphaxiv_oauth_access_token}",
+        }
+
         try:
             async with asyncio.timeout(self._settings.request_timeout_seconds):
-                async with sse_client(self._settings.alphaxiv_mcp_url) as streams:
+                async with sse_client(self._settings.alphaxiv_mcp_url, headers=headers) as streams:
                     read_stream, write_stream = streams
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
@@ -41,8 +52,8 @@ class AlphaXivClient:
             raise AlphaXivClientError("Timed out while calling alphaXiv MCP.") from exc
         except Exception as exc:  # pragma: no cover - network boundary
             raise AlphaXivClientError(
-                "alphaXiv MCP request failed. The alphaXiv docs specify SSE transport with OAuth 2.0; "
-                f"this standalone client currently expects authentication to be handled by the MCP stack or calling environment. Original error: {exc}"
+                "alphaXiv MCP request failed while using the configured OAuth bearer token. "
+                f"Check ALPHAXIV_MCP_URL, token validity, and MCP/SSE connectivity. Original error: {exc}"
             ) from exc
 
         return self._coerce_tool_result(result)

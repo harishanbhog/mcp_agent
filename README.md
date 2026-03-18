@@ -41,12 +41,13 @@ Important settings:
 - `OPENAI_API_KEY` for query expansion in live mode
 - `OPENAI_BASE_URL` optional for OpenAI-compatible providers
 - `ALPHAXIV_MCP_URL` defaults to `https://api.alphaxiv.org/mcp/v1`
+- `ALPHAXIV_OAUTH_ACCESS_TOKEN` optional convenience setting for a bearer token obtained from your alphaXiv OAuth 2.0 flow
 - `MCP_MODE=mock` for local testing or `MCP_MODE=live` for alphaXiv MCP
 - `REQUEST_TIMEOUT_SECONDS` to control LLM and MCP timeouts
 
 ## alphaXiv authentication note
 
-As of March 18, 2026, the alphaXiv MCP docs describe the MCP endpoint as SSE transport with OAuth 2.0 authentication, but they do not document a static bearer-token environment variable for direct client use. This project therefore keeps the live adapter transport isolated while assuming authentication will be handled by the MCP stack or a future official OAuth integration path.
+As of March 18, 2026, the alphaXiv MCP docs describe the MCP endpoint as SSE transport with OAuth 2.0 authentication, but they do not document a project-specific environment variable for passing an OAuth access token. This project therefore supports `ALPHAXIV_OAUTH_ACCESS_TOKEN` as a convenience for environments that already have a valid bearer token, while still keeping the live adapter isolated so a fuller MCP OAuth integration can be added later.
 
 ## Run the CLI
 
@@ -75,7 +76,7 @@ poetry run pytest
 
 - Use `MCP_MODE=mock` for local development and automated tests.
 - Use `MCP_MODE=live` to connect to alphaXiv MCP over SSE.
-- In live mode, this package does not invent a custom token setting; it follows the current docs and leaves OAuth handling to the MCP client/runtime boundary.
+- In live mode, provide `OPENAI_API_KEY` for query expansion and either `ALPHAXIV_OAUTH_ACCESS_TOKEN` or a calling runtime that handles the MCP OAuth flow.
 
 The alphaXiv adapter is isolated in `mcp_agent/alphaxiv_client.py`, so later router integration only needs to call `run_mcp_agent`.
 
