@@ -199,7 +199,7 @@ class AlphaXivClient:
             read_stream, write_stream = await self._await_stage(
                 transport_context.__aenter__(),
                 stage=stage,
-                timeout_seconds=self._settings.mcp_auth_timeout_seconds,
+                timeout_seconds=self._settings.mcp_request_timeout_seconds,
                 metadata=metadata,
             )
             transport_opened = True
@@ -620,6 +620,8 @@ class AlphaXivClient:
     ) -> Any:
         started_at = perf_counter()
         try:
+            if self._debug_mcp:
+                logger.debug("alphaXiv %s starting (timeout=%.1fs)", stage, timeout_seconds)
             result = await asyncio.wait_for(awaitable, timeout=timeout_seconds)
         except TimeoutError as exc:
             status = "tool_call_timed_out" if stage == "tool_call" else self._classify_exception(
@@ -700,7 +702,12 @@ class AlphaXivClient:
         async with create_mcp_http_client(
             headers=headers,
             auth=auth,
-            timeout=httpx.Timeout(timeout, read=sse_read_timeout),
+            timeout=httpx.Timeout(
+                connect=timeout,
+                read=sse_read_timeout,
+                write=timeout,
+                pool=timeout,
+            ),
         ) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
                 event_source.response.raise_for_status()

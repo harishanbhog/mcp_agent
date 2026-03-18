@@ -261,3 +261,34 @@ def test_tool_call_timeout_reports_specific_status(monkeypatch: pytest.MonkeyPat
 
     assert exc_info.value.metadata["auth_status"] == "tool_call_timed_out"
     assert "embedding_similarity_search" in str(exc_info.value)
+
+
+def test_sse_connect_uses_request_timeout_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AlphaXivClient(
+        Settings(
+            MCP_MODE="live",
+            ALPHAXIV_MCP_URL="https://api.alphaxiv.org/mcp/v1",
+            MCP_TOKEN_STORAGE_PATH="/tmp/alphaxiv-connect-timeout.json",
+            MCP_AUTH_TIMEOUT_SECONDS=5,
+            MCP_REQUEST_TIMEOUT_SECONDS=90,
+        )
+    )
+    _patch_live_oauth(monkeypatch, client)
+
+    observed: list[tuple[str, float]] = []
+    original_await_stage = client._await_stage
+
+    async def recording_await_stage(awaitable, *, stage: str, timeout_seconds: float, metadata: dict):
+        observed.append((stage, timeout_seconds))
+        return await original_await_stage(
+            awaitable,
+            stage=stage,
+            timeout_seconds=timeout_seconds,
+            metadata=metadata,
+        )
+
+    monkeypatch.setattr(client, "_await_stage", recording_await_stage)
+
+    asyncio.run(client.ensure_authenticated())
+
+    assert observed[0] == ("sse_connect", 90)
