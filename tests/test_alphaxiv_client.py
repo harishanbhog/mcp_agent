@@ -98,6 +98,22 @@ def test_ping_events_are_treated_as_heartbeat() -> None:
     assert client._is_heartbeat_event(event_name="message", data='{"jsonrpc":"2.0"}') is False
 
 
+def test_clerk_signed_out_headers_fail_fast() -> None:
+    client = AlphaXivClient(Settings(MCP_MODE="mock"))
+
+    with pytest.raises(AlphaXivClientError) as exc_info:
+        client._raise_for_rejected_sse_response(
+            {
+                "x-clerk-auth-status": "signed-out",
+                "x-clerk-auth-reason": "token-invalid",
+                "x-clerk-auth-message": 'Invalid JWT type "at+jwt". Expected "JWT".',
+            }
+        )
+
+    assert exc_info.value.metadata["auth_status"] == "token_invalid"
+    assert "Invalid JWT type" in exc_info.value.metadata["auth_rejection_detail"]
+
+
 @dataclass
 class _FakeTool:
     name: str

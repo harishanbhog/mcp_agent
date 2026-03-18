@@ -469,6 +469,8 @@ class AlphaXivClient:
             return "alphaXiv OAuth discovery failed before the MCP session could be established."
         if auth_status == "unauthorized":
             return "alphaXiv rejected the authenticated MCP request with 401 Unauthorized."
+        if auth_status == "token_invalid":
+            return "alphaXiv rejected the OAuth token before opening the SSE MCP session."
         if auth_status == "token_refresh_failed":
             return "alphaXiv OAuth token refresh failed during MCP authentication."
         if auth_status == "invalid_callback":
@@ -500,6 +502,8 @@ class AlphaXivClient:
 
         if "401" in combined or "unauthorized" in combined:
             return {**metadata, "auth_status": "unauthorized"}
+        if "token-invalid" in combined or "invalid jwt type" in combined:
+            return {**metadata, "auth_status": "token_invalid"}
         if "refresh" in combined and "token" in combined:
             return {**metadata, "auth_status": "token_refresh_failed"}
         if "redirect" in combined or "callback" in combined or "state" in combined:
@@ -711,6 +715,7 @@ class AlphaXivClient:
         ) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
                 event_source.response.raise_for_status()
+                self._raise_for_rejected_sse_response(event_source.response.headers)
 
                 async def sse_reader(task_status: TaskStatus[str] = anyio.TASK_STATUS_IGNORED) -> None:
                     try:
@@ -771,6 +776,31 @@ class AlphaXivClient:
         if normalized in {"ping", "keepalive", "heartbeat"}:
             return True
         return normalized == "message" and not (data or "").strip()
+
+    def _raise_for_rejected_sse_response(self, headers: Any) -> None:
+        clerk_status = headers.get("x-clerk-auth-status")
+        clerk_reason = headers.get("x-clerk-auth-reason")
+        clerk_message = headers.get("x-clerk-auth-message")
+        if clerk_status != "signed-out" and clerk_reason != "token-invalid":
+            return
+
+        detail = clerk_message or "alphaXiv returned signed-out/token-invalid headers during SSE setup."
+        raise AlphaXivClientError(
+            "alphaXiv rejected the OAuth token before opening the SSE MCP session.",
+            metadata={
+                **self._base_metadata(),
+                "auth_mode": "oauth_discovery",
+                "auth_status": "token_invalid",
+                "token_cache_used": self._token_cache_used,
+                "oauth_bootstrap_performed": self._oauth_bootstrap_performed,
+                "debug_hint": (
+                    "alphaXiv returned x-clerk-auth-status/x-clerk-auth-reason headers. "
+                    "This usually means the OAuth token type is not accepted by the SSE endpoint."
+                ),
+                "auth_rejection_detail": detail,
+            },
+            debug_details=[detail],
+        )
 
     def _build_mock_response(self, expanded_query: str) -> dict[str, Any]:
         return {
