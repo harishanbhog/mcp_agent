@@ -19,14 +19,21 @@ async def run_mcp_agent(
     query_expander = expander or _build_expander(runtime_settings)
     alphaxiv_client = client or AlphaXivClient(runtime_settings)
 
+    expansion_error: str | None = None
+    retrieval_error: str | None = None
+
     try:
         expanded_query = await query_expander.expand_query(validated_request)
-    except QueryExpansionError:
+        expansion_mode = "llm"
+    except QueryExpansionError as exc:
+        expansion_error = str(exc)
         expanded_query = await StubQueryExpander().expand_query(validated_request)
+        expansion_mode = "stub_fallback"
 
     try:
         raw_results = await alphaxiv_client.embedding_similarity_search(expanded_query)
-    except AlphaXivClientError:
+    except AlphaXivClientError as exc:
+        retrieval_error = str(exc)
         raw_results = {"papers": []}
 
     papers = normalize_papers(raw_results)
@@ -39,7 +46,12 @@ async def run_mcp_agent(
         "llm_model_used": validated_request.llm_model,
         "retrieval_count": len(papers),
         "mcp_mode": runtime_settings.mcp_mode,
+        "query_expansion_mode": expansion_mode,
     }
+    if expansion_error:
+        metadata["query_expansion_error"] = expansion_error
+    if retrieval_error:
+        metadata["retrieval_error"] = retrieval_error
 
     response = MCPAgentResponse(
         floor_id=validated_request.floor_id,
