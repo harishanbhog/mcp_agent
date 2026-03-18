@@ -6,7 +6,7 @@ import json
 import logging
 import sys
 
-from mcp_agent.alphaxiv_client import AlphaXivClient
+from mcp_agent.alphaxiv_client import AlphaXivClient, AlphaXivClientError
 from mcp_agent.config import get_settings
 from mcp_agent.schemas import MCPAgentRequest
 from mcp_agent.service import run_mcp_agent
@@ -27,7 +27,12 @@ async def _run(args: argparse.Namespace) -> None:
             return
 
     if args.auth_only:
-        metadata = await client.ensure_authenticated()
+        try:
+            metadata = await client.ensure_authenticated()
+        except AlphaXivClientError as exc:
+            print(json.dumps({"error": str(exc), **exc.metadata}, indent=2))
+            raise SystemExit(1) from exc
+
         print(json.dumps(metadata, indent=2))
         return
 
