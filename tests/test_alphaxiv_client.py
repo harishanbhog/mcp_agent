@@ -76,6 +76,33 @@ def test_clerk_session_token_is_preferred_for_live_auth() -> None:
     assert auth_context.auth_status == "clerk_session_token_supplied"
 
 
+def test_cached_oauth_token_is_exchanged_for_clerk_session_jwt(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AlphaXivClient(
+        Settings(
+            MCP_MODE="live",
+            ALPHAXIV_MCP_URL="https://api.alphaxiv.org/mcp/v1",
+            MCP_TOKEN_STORAGE_PATH="/tmp/alphaxiv-exchange.json",
+        )
+    )
+
+    async def fake_get_tokens():
+        return SimpleNamespace(access_token="oauth-access-token")
+
+    async def fake_exchange(access_token: str) -> str:
+        assert access_token == "oauth-access-token"
+        return "clerk-session-jwt"
+
+    monkeypatch.setattr(client._token_storage, "get_tokens", fake_get_tokens)
+    monkeypatch.setattr(client, "_exchange_oauth_access_token_for_clerk_jwt", fake_exchange)
+
+    auth_context = asyncio.run(client._build_live_auth_context())
+
+    assert auth_context.auth is None
+    assert auth_context.headers == {"Authorization": "Bearer clerk-session-jwt"}
+    assert auth_context.auth_mode == "oauth_token_exchange"
+    assert auth_context.auth_status == "clerk_session_token_exchanged"
+
+
 def test_oauth_bootstrap_required_path_reports_clear_status(monkeypatch: pytest.MonkeyPatch) -> None:
     client = AlphaXivClient(
         Settings(

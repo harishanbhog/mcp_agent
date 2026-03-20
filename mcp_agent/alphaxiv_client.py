@@ -283,6 +283,10 @@ class AlphaXivClient:
                 oauth_bootstrap_performed=False,
             )
 
+        exchanged_auth_context = await self._build_token_exchange_auth_context()
+        if exchanged_auth_context is not None:
+            return exchanged_auth_context
+
         legacy_token = self._settings.get_legacy_bearer_token()
         if self._use_legacy_bearer_token:
             if not legacy_token:
@@ -339,6 +343,96 @@ class AlphaXivClient:
             token_cache_used=bool(cached_token),
             oauth_bootstrap_performed=False,
         )
+
+    async def _build_token_exchange_auth_context(self) -> _LiveAuthContext | None:
+        try:
+            cached_token = await self._token_storage.get_tokens()
+        except ImportError:
+            return None
+
+        access_token = getattr(cached_token, "access_token", None)
+        if not isinstance(access_token, str) or not access_token.strip():
+            return None
+
+        exchanged_token = await self._exchange_oauth_access_token_for_clerk_jwt(access_token)
+        self._oauth_bootstrap_performed = False
+        self._oauth_callback_completed = False
+        self._token_cache_used = True
+        return _LiveAuthContext(
+            auth=None,
+            headers={"Authorization": f"Bearer {exchanged_token}"},
+            auth_mode="oauth_token_exchange",
+            auth_status="clerk_session_token_exchanged",
+            token_cache_used=True,
+            oauth_bootstrap_performed=False,
+        )
+
+    async def _exchange_oauth_access_token_for_clerk_jwt(self, access_token: str) -> str:
+        try:
+            import httpx
+        except ImportError as exc:  # pragma: no cover - dependency boundary
+            raise AlphaXivClientError(
+                "httpx is required to exchange the OAuth access token for an alphaXiv Clerk session JWT.",
+                metadata={
+                    **self._base_metadata(),
+                    "auth_mode": "oauth_token_exchange",
+                    "auth_status": "missing_httpx",
+                    "debug_hint": "Install project dependencies so the token-exchange request can run.",
+                },
+            ) from exc
+
+        started_at = perf_counter()
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=self._settings.mcp_auth_timeout_seconds,
+                    read=self._settings.mcp_auth_timeout_seconds,
+                    write=self._settings.mcp_auth_timeout_seconds,
+                    pool=self._settings.mcp_auth_timeout_seconds,
+                )
+            ) as client:
+                response = await client.post(
+                    self._settings.alphaxiv_auth_exchange_url,
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                        "subject_token": access_token,
+                        "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                        "template": self._settings.alphaxiv_clerk_template,
+                    },
+                )
+                response.raise_for_status()
+        except Exception as exc:
+            raise AlphaXivClientError(
+                "Failed to exchange the cached OAuth access token for an alphaXiv Clerk session JWT.",
+                metadata={
+                    **self._base_metadata(),
+                    "auth_mode": "oauth_token_exchange",
+                    "auth_status": "token_exchange_failed",
+                    "token_cache_used": True,
+                    "debug_hint": (
+                        "The alphaXiv auth proxy token exchange failed. "
+                        "Check ALPHAXIV_AUTH_EXCHANGE_URL, the cached OAuth token, and ALPHAXIV_CLERK_TEMPLATE."
+                    ),
+                },
+            ) from exc
+
+        payload = response.json()
+        exchanged_token = payload.get("access_token")
+        if not isinstance(exchanged_token, str) or not exchanged_token.strip():
+            raise AlphaXivClientError(
+                "alphaXiv auth proxy returned a token-exchange response without an access_token.",
+                metadata={
+                    **self._base_metadata(),
+                    "auth_mode": "oauth_token_exchange",
+                    "auth_status": "token_exchange_failed",
+                    "token_cache_used": True,
+                    "debug_hint": "Inspect the alphaXiv auth proxy response body and ensure it returns access_token.",
+                },
+            )
+
+        self._debug_log("token_exchange", started_at)
+        return exchanged_token
 
     def _handle_oauth_redirect(self, auth_url: str) -> Awaitable[None]:
         async def _runner() -> None:
@@ -484,7 +578,9 @@ class AlphaXivClient:
         if auth_status == "unauthorized":
             return "alphaXiv rejected the authenticated MCP request with 401 Unauthorized."
         if auth_status == "token_invalid":
-            return "alphaXiv rejected the supplied token before opening the SSE MCP session. For alphaXiv, use a Clerk session JWT."
+            return "alphaXiv rejected the supplied token before opening the SSE MCP session. Use a Clerk session JWT or the alphaXiv auth-proxy token exchange."
+        if auth_status == "token_exchange_failed":
+            return "alphaXiv OAuth token exchange failed before the SSE MCP session could start."
         if auth_status == "token_refresh_failed":
             return "alphaXiv OAuth token refresh failed during MCP authentication."
         if auth_status == "invalid_callback":
@@ -518,6 +614,8 @@ class AlphaXivClient:
             return {**metadata, "auth_status": "unauthorized"}
         if "token-invalid" in combined or "invalid jwt type" in combined:
             return {**metadata, "auth_status": "token_invalid"}
+        if "token exchange" in combined:
+            return {**metadata, "auth_status": "token_exchange_failed"}
         if "refresh" in combined and "token" in combined:
             return {**metadata, "auth_status": "token_refresh_failed"}
         if "redirect" in combined or "callback" in combined or "state" in combined:
@@ -809,7 +907,7 @@ class AlphaXivClient:
                 "oauth_bootstrap_performed": self._oauth_bootstrap_performed,
                 "debug_hint": (
                     "alphaXiv returned x-clerk-auth-status/x-clerk-auth-reason headers. "
-                    "For alphaXiv SSE, prefer ALPHAXIV_CLERK_SESSION_TOKEN from Clerk __session/getToken() instead of the raw OAuth access token."
+                    "Use ALPHAXIV_CLERK_SESSION_TOKEN or exchange the OAuth access token through ALPHAXIV_AUTH_EXCHANGE_URL before opening SSE."
                 ),
                 "auth_rejection_detail": detail,
             },
