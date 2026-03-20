@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "mcp-agent"
+version = "0.1.0"
+description = "Standalone alphaXiv MCP research retrieval agent for xFloor V1"
+authors = ["OpenAI Codex <codex@openai.com>"]
+readme = "README.md"
+packages = [{ include = "mcp_agent" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic = "^2.11.1"
+pydantic-settings = "^2.8.1"
+httpx = "^0.28.1"
+openai = "^1.68.2"
+python-dotenv = "^1.0.1"
+mcp = "^1.6.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.5"
+pytest-asyncio = "^0.25.3"
+
+[tool.poetry.scripts]
+mcp-agent = "mcp_agent.cli:main"
+
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"
