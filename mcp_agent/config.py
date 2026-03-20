@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
     alphaxiv_mcp_url: str = Field(default="https://api.alphaxiv.org/mcp/v1", alias="ALPHAXIV_MCP_URL")
+    alphaxiv_clerk_session_token: str | None = Field(default=None, alias="ALPHAXIV_CLERK_SESSION_TOKEN")
     alphaxiv_legacy_bearer_token: str | None = Field(default=None, alias="ALPHAXIV_LEGACY_BEARER_TOKEN")
     alphaxiv_oauth_access_token: str | None = Field(default=None, alias="ALPHAXIV_OAUTH_ACCESS_TOKEN")
     mcp_token_storage_path: str = Field(

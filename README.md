@@ -41,6 +41,7 @@ Important settings:
 - `OPENAI_API_KEY` for query expansion in live mode
 - `OPENAI_BASE_URL` optional for OpenAI-compatible providers
 - `ALPHAXIV_MCP_URL` defaults to `https://api.alphaxiv.org/mcp/v1`
+- `ALPHAXIV_CLERK_SESSION_TOKEN` preferred live auth token for alphaXiv SSE; use the Clerk `__session` token or a token returned by Clerk `getToken()`
 - `MCP_TOKEN_STORAGE_PATH` controls where OAuth tokens/client registration are cached
 - `MCP_AUTH_TIMEOUT_SECONDS` controls OAuth discovery / auth handshake timeout
 - `MCP_REQUEST_TIMEOUT_SECONDS` controls the SSE session / tool-call timeout (default `120`)
@@ -55,7 +56,9 @@ alphaXiv documents:
 - transport: SSE
 - auth: OAuth 2.0
 
-The live client now uses the Python MCP SDK's OAuth discovery flow instead of assuming a manually pasted bearer token. On the first live run, the CLI can perform an interactive OAuth bootstrap and cache the resulting token/client registration locally. Subsequent runs reuse the cached token automatically.
+In practice, alphaXiv's SSE gateway currently expects a **Clerk-generated session JWT** in the `Authorization: Bearer ...` header. If you send the raw OAuth access token, alphaXiv may respond with a Clerk header error like `Invalid JWT type "at+jwt". Expected "JWT"`.
+
+For alphaXiv live mode, prefer `ALPHAXIV_CLERK_SESSION_TOKEN`. You can source it from the Clerk `__session` value in a browser/webview context or from Clerk's `getToken()` API. The project still retains the OAuth discovery path as a fallback/integration aid, but the Clerk session JWT is now the preferred alphaXiv auth path.
 
 `ALPHAXIV_LEGACY_BEARER_TOKEN` is retained only as an explicit fallback for temporary debugging when combined with `--use-legacy-bearer-token`.
 
@@ -78,7 +81,7 @@ poetry run python -m mcp_agent.cli --json ...
 
 ## OAuth bootstrap and token cache
 
-Bootstrap OAuth without running retrieval:
+Validate alphaXiv auth without running retrieval:
 
 ```bash
 poetry run python -m mcp_agent.cli --auth-only
@@ -109,7 +112,8 @@ poetry run pytest
 - Use `MCP_MODE=mock` for local development and automated tests.
 - Use `MCP_MODE=live` to connect to alphaXiv MCP over SSE.
 - In live mode, provide `OPENAI_API_KEY` for query expansion.
-- For alphaXiv auth, run `--auth-only` once to complete OAuth bootstrap and cache the token, then run the normal CLI command.
+- For alphaXiv auth, prefer setting `ALPHAXIV_CLERK_SESSION_TOKEN` and then run `--auth-only` to validate it before running retrieval.
+- OAuth discovery remains available as a fallback, but alphaXiv's SSE gateway may reject raw OAuth access tokens with a Clerk `token-invalid` response.
 - If debugging a pre-issued raw bearer token, pass `--use-legacy-bearer-token` and set `ALPHAXIV_LEGACY_BEARER_TOKEN`, but this is not the default path.
 
 ## Live debugging examples

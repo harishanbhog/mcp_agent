@@ -269,6 +269,20 @@ class AlphaXivClient:
                 await transport_context.__aexit__(None, None, None)
 
     async def _build_live_auth_context(self) -> _LiveAuthContext:
+        clerk_session_token = self._settings.alphaxiv_clerk_session_token
+        if clerk_session_token:
+            self._oauth_bootstrap_performed = False
+            self._oauth_callback_completed = False
+            self._token_cache_used = False
+            return _LiveAuthContext(
+                auth=None,
+                headers={"Authorization": f"Bearer {clerk_session_token}"},
+                auth_mode="clerk_session_jwt",
+                auth_status="clerk_session_token_supplied",
+                token_cache_used=False,
+                oauth_bootstrap_performed=False,
+            )
+
         legacy_token = self._settings.get_legacy_bearer_token()
         if self._use_legacy_bearer_token:
             if not legacy_token:
@@ -470,7 +484,7 @@ class AlphaXivClient:
         if auth_status == "unauthorized":
             return "alphaXiv rejected the authenticated MCP request with 401 Unauthorized."
         if auth_status == "token_invalid":
-            return "alphaXiv rejected the OAuth token before opening the SSE MCP session."
+            return "alphaXiv rejected the supplied token before opening the SSE MCP session. For alphaXiv, use a Clerk session JWT."
         if auth_status == "token_refresh_failed":
             return "alphaXiv OAuth token refresh failed during MCP authentication."
         if auth_status == "invalid_callback":
@@ -795,7 +809,7 @@ class AlphaXivClient:
                 "oauth_bootstrap_performed": self._oauth_bootstrap_performed,
                 "debug_hint": (
                     "alphaXiv returned x-clerk-auth-status/x-clerk-auth-reason headers. "
-                    "This usually means the OAuth token type is not accepted by the SSE endpoint."
+                    "For alphaXiv SSE, prefer ALPHAXIV_CLERK_SESSION_TOKEN from Clerk __session/getToken() instead of the raw OAuth access token."
                 ),
                 "auth_rejection_detail": detail,
             },

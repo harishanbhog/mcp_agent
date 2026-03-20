@@ -58,6 +58,24 @@ def test_invalid_mcp_url_reports_specific_error() -> None:
     assert exc_info.value.metadata["auth_status"] == "invalid_mcp_url"
 
 
+def test_clerk_session_token_is_preferred_for_live_auth() -> None:
+    client = AlphaXivClient(
+        Settings(
+            MCP_MODE="live",
+            ALPHAXIV_MCP_URL="https://api.alphaxiv.org/mcp/v1",
+            ALPHAXIV_CLERK_SESSION_TOKEN="clerk-session-jwt",
+            MCP_TOKEN_STORAGE_PATH="/tmp/alphaxiv-clerk-session.json",
+        )
+    )
+
+    auth_context = asyncio.run(client._build_live_auth_context())
+
+    assert auth_context.auth is None
+    assert auth_context.headers == {"Authorization": "Bearer clerk-session-jwt"}
+    assert auth_context.auth_mode == "clerk_session_jwt"
+    assert auth_context.auth_status == "clerk_session_token_supplied"
+
+
 def test_oauth_bootstrap_required_path_reports_clear_status(monkeypatch: pytest.MonkeyPatch) -> None:
     client = AlphaXivClient(
         Settings(
